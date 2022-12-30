@@ -1,0 +1,1164 @@
+---
+title: "MXN600 Assignment 2"
+author: "Group 7"
+date: '2022-10-13'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+As a result of the recent acquisition of our company, this analysis is motivated by improving the performance of the existing model for loan default predictions. The exsting model has a Gini score of 0.110, performing not much better than a random coin flip. 
+
+We will be doing this by building a new model using the available data, which unfortunately appears to be from the years 2007 to 2011. As this data is more than a decade old at this point, we have to include the caveat that the predicted performance of the model may not reflect reality until additional testing with new data is done. Regardless, we will assess the performance of the model using the existing data available to us, utilizing a cross validation approach based on the ROC area under the curve and Gini score. The resulting model will be analyzed in terms of its significant covariates and their effects, comparing them to the predictors that were historically thought to be significant. 
+
+To help in assessing whether this time frame is a risk, we will also be assessing whether there might be a variation in trends that may exist over time, or even between different jurisdictions such as state, or zip code. After building this new model, we will assess whether accounting for these variations will improve the performance of the model.  
+
+```{r packages, include=FALSE}
+#Loading the packages
+
+library(tidyverse)
+library(ggpubr)
+library(DHARMa)
+library(MASS)
+library(AER)
+library(GGally)
+library('pROC')
+library(lattice)
+library(lme4)
+library(arm)
+library(lubridate)
+
+
+#options(warn=-1)
+options(warn=0)
+
+```
+
+## Data Pre-processing
+
+***how do we check for missing data***
+
+We begin the analysis by loading in the available data, checking its summary statistics and verifying the structure of the data. 
+
+```{r }
+raw_data <- read.csv("benchmark_training_loan_data.csv",header=TRUE)
+head(raw_data)
+str(raw_data)
+```
+
+We can see immediately that some data processing is required. 
+
+There is an index column, "X", that would need to be removed.
+
+There are also some categorical variables that would need to be factorized, name "emp_length", "home_ownership", "verification_status", "purpose", and  "term".
+
+We can also see that some variables have quite a large interval of values, such as "annual_inc", "revol_bal", "total_rec_prncp", "total_rec_int", and "last_pymnt_amnt", and therefore it would be appropriate to scale them. 
+
+```{r}
+data <- subset(raw_data, select = -c(X))
+data$emp_length <- factor(data$emp_length)
+data$home_ownership <- factor(data$home_ownership)
+data$verification_status <- factor(data$verification_status)
+data$purpose <- factor(data$purpose)
+data$term <- factor(data$term)
+```
+
+After factoring the covariates, we assess the structure again:
+
+```{r}
+str(data)
+```
+
+From the provided data dictionary, we find that "emp_length", representing the employee length in years, should have 11 values: one each for each of zero ("<1 year") to 10 ("10+")). However, the data shows that it is a factor with 12 levels, so we need to investigate further.
+
+```{r}
+table(data$emp_length)
+```
+
+This shows that there are 591 "n/a" values. However, we do not have any reason to determine that these are errors in the data, and could possibly be intentionally entered due to an unavailability of data. As this could potentially be in the validation dataset and could also be used when assessing credit risk for new applications, we will continue to keep the "n/a" values and treat them as a factor. 
+
+# -----------------GET NEW PLOTS WHICH DONT LOOK SO TERRIBLE--------------------
+
+## Exploratory Plots
+
+Next we will perform some initial exploratory visualizations in order to understand the data that we are working with. 
+
+```{r}
+y <- data$repay_fail
+boxplot(data$loan_amnt~y,ylab="Loan amount",xlab="Default")
+boxplot(data$int_rate~y,ylab="Interest rate",xlab="Repay Fail",main="Interest Rate by Loan Default")
+boxplot(data$annual_inc~y,ylab="Annual income",xlab="Default",ylim=c(0,175000))
+boxplot(data$annual_inc~y,ylab="Annual income",xlab="Default")
+boxplot(data$dti~y,ylab="dti",xlab="Default")
+boxplot(data$revol_bal~y,ylab="Total credit revolving balance",xlab="Default")
+boxplot(data$revol_bal~y,ylab="Total credit revolving balance",xlab="Default",ylim=c(0,45000))
+boxplot(data$revol_util~y,ylab="Revolving line utilization rate",xlab="Default")
+boxplot(data$credit_age_yrs~y,ylab="# years since earliest reported credit line",xlab="Default")
+boxplot(raw_data$last_pymnt_amnt~raw_data$repay_fail,ylab="last_pymnt_amnt",xlab="Default")
+
+
+
+boxplot(data$delinq_2yrs~y,ylab="delinq_2yrs",xlab="Default")
+boxplot(data$inq_last_6mths~y,ylab="inq_last_6mths",xlab="Default")
+boxplot(data$inq_last_6mths~y,ylab="inq_last_6mths",xlab="Default",ylim=c(0,7))
+boxplot(data$pub_rec~y,ylab="pub_rec",xlab="Default")
+boxplot(data$total_acc~y,ylab="total_acc",xlab="Default")
+```
+
+***fill these in ***
+The exploratory plots point out a few things of interest to note:
+
+1. 
+
+2.  
+
+3.  
+
+4.  
+
+5. 
+
+
+## Temp Plots
+```{r}
+boxplot(data$int_rate~y,ylab="Interest rate",xlab="Repay Fail",main="Interest Rate by Loan Default")
+
+ggplot(data = data) + 
+  geom_boxplot(  aes(fill = as.factor(repay_fail),y = int_rate, x =as.factor(repay_fail)), alpha = .2  ) + 
+  labs(y = "Interest Rate", x = "Default",title="Interest Rate by Loan Default")
+
+
+```
+
+```{r}
+ggplot(data = data, aes(y=reorder(purpose,repay_fail),fill = as.factor(repay_fail))) +
+  geom_bar(mapping = aes(),position = "fill")+
+  geom_text(aes(label = ..count..), stat = "count", position = "fill",hjust=1)+
+  labs(x="Percentage of Loan Defaults", y="Purpose", title="Percentage of Default by Purpose", fill="Loan Default")+
+  scale_x_continuous(labels = scales::percent)+
+  scale_fill_brewer()+
+  theme_bw()
+
+```
+
+There are some huge outliers, but we dont have enough information to justify removing them, could very easily be valid data (high income, lots of accounts/loan/debt). Check the linear assumption for logistic regression and further explore the data. 
+
+
+```{r}
+hist(data$loan_amnt,xlab="Loan amount")
+
+x <- data$loan_amnt
+g <- cut(x, breaks=quantile(x,seq(0,100,10)/100))
+ym <- tapply(y, g, mean)
+xm <- tapply(x, g, mean)
+
+plot(xm,ym)
+ymp <- log(ym/(1-ym))
+plot(xm,ymp)
+```
+
+```{r int_rate}
+hist(data$int_rate,xlab="Interest Rate")
+
+x <- data$int_rate
+g <- cut(x, breaks=quantile(x,seq(0,100,10)/100))
+ym <- tapply(y, g, mean)
+xm <- tapply(x, g, mean)
+
+plot(xm,ym)
+ymp <- log(ym/(1-ym))
+plot(xm,ymp)
+```
+
+```{r annual_income}
+hist(data$annual_inc,xlab="Annual Income")
+
+x <- data$annual_inc
+g <- cut(x, breaks=quantile(x,seq(0,100,10)/100))
+ym <- tapply(y, g, mean)
+
+xm <- tapply(x, g, mean)
+
+plot(xm,ym)
+ymp <- log(ym/(1-ym))
+plot(xm,ymp)
+```
+
+```{r home_ownership}
+q <- colSums(table(y,data$home_ownership))
+q <- rbind(q,q)
+table(y,data$home_ownership)/q
+
+ggplot(data, aes(x = home_ownership, y = repay_fail)) +
+stat_sum(aes(size = ..n.., group = 1)) +
+scale_size_area(max_size=10)
+```
+
+
+```{r emp_length}
+q <- colSums(table(y,data$emp_length))
+q <- rbind(q,q)
+table(y,data$emp_length)/q
+
+ggplot(data, aes(x = emp_length, y = repay_fail)) +
+stat_sum(aes(size = ..n.., group = 1)) +
+scale_size_area(max_size=10)
+```
+
+```{r verification_status}
+hist(data$annual_inc,xlab="Verification Status")
+
+q <- colSums(table(y,data$verification_status))
+q <- rbind(q,q)
+table(y,data$verification_status)/q
+
+ggplot(data, aes(x = verification_status, y = repay_fail)) +
+stat_sum(aes(size = ..n.., group = 1)) +
+scale_size_area(max_size=10)
+```
+
+```{r purpose}
+q <- colSums(table(y,data$purpose))
+q <- rbind(q,q)
+table(y,data$purpose)/q
+
+ggplot(data, aes(x = purpose, y = repay_fail)) +
+stat_sum(aes(size = ..n.., group = 1)) +
+scale_size_area(max_size=10)
+```
+
+```{r delinq_2yrs}
+hist(data$delinq_2yrs,xlab="Delinq")
+
+q <- colSums(table(y,data$delinq_2yrs))
+q <- rbind(q,q)
+table(y,data$delinq_2yrs)/q
+
+ggplot(data, aes(x = delinq_2yrs, y = repay_fail)) +
+stat_sum(aes(size = ..n.., group = 1)) +
+scale_size_area(max_size=10)
+```
+
+```{r pub_rec}
+q <- colSums(table(y,data$pub_rec))
+q <- rbind(q,q)
+table(y,data$pub_rec)/q
+
+ggplot(data, aes(x = pub_rec, y = repay_fail)) +
+stat_sum(aes(size = ..n.., group = 1)) +
+scale_size_area(max_size=10)
+```
+
+```{r term}
+q <- colSums(table(y,data$term))
+q <- rbind(q,q)
+table(y,data$term)/q
+
+ggplot(data, aes(x = term, y = int_rate)) +
+stat_sum(aes(size = ..n.., group = 1)) +
+scale_size_area(max_size=10)
+
+ggplot(raw_data, aes(x = term, y = int_rate)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()
+
+```
+
+
+
+```{r Boxplot Continuous Variables}
+ggplot(raw_data, aes(x = repay_fail, y = loan_amnt, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +   
+  geom_boxplot()
+
+ggplot(raw_data, aes(x = repay_fail, y = int_rate, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()
+
+ggplot(raw_data, aes(x = repay_fail, y = annual_inc, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +   
+  geom_boxplot()  
+
+ggplot(raw_data, aes(x = repay_fail, y = dti, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()
+
+ggplot(raw_data, aes(x = repay_fail, y = delinq_2yrs, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()  
+
+ggplot(raw_data, aes(x = repay_fail, y = inq_last_6mths, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()  
+
+ggplot(raw_data, aes(x = repay_fail, y = open_acc, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()  
+
+ggplot(raw_data, aes(x = repay_fail, y = pub_rec, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()  
+
+ggplot(raw_data, aes(x = repay_fail, y = revol_bal, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()  
+
+ggplot(raw_data, aes(x = repay_fail, y = total_acc, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot() 
+
+ggplot(raw_data, aes(x = repay_fail, y = total_rec_prncp, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()  
+
+ggplot(raw_data, aes(x = repay_fail, y = total_rec_int, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot() 
+
+ggplot(raw_data, aes(x = repay_fail, y = last_pymnt_amnt, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()
+
+ggplot(raw_data, aes(x = repay_fail, y = credit_age_yrs, group = repay_fail)) + 
+  stat_boxplot(geom = "errorbar", width = 0.5) +    
+  geom_boxplot()
+
+```
+
+```{r Boxplot Factor Variables}
+ggplot(raw_data, aes(term)) + 
+  geom_histogram(aes(fill = as.factor(repay_fail)), stat = "count")
+
+ggplot(raw_data, aes(emp_length)) + 
+  geom_histogram(aes(fill = as.factor(repay_fail)), stat = "count")
+
+ggplot(raw_data, aes(home_ownership)) + 
+  geom_histogram(aes(fill = as.factor(repay_fail)), stat = "count")
+
+ggplot(raw_data, aes(verification_status)) + 
+  geom_histogram(aes(fill = as.factor(repay_fail)), stat = "count")
+
+ggplot(raw_data, aes(purpose)) + 
+  geom_histogram(aes(fill = as.factor(repay_fail)), stat = "count")
+
+```
+
+
+
+
+## Feature Selection 
+
+The next step of the model is feature selection. The exploratory plots gave us some initial hints towards which variables might be strong indicators for predicting credit risk.
+
+To begin with , we have to consider the variable "last repayment amount". The explanatory plot indicates that this would likely be a strong predictor for credit risk. The data dictionary describes this variable somewhat ambiguously as "the last payment amount received". However, due to the format of the data having each row representing the characteristics of an individual loan, we speculate that this information is the last amount repaid into each individual loan that may eventually have been defaulted on or repaid.
+
+We confirm this by comparing rows with large values of the last payment amount relative to the loan amount (indicating loans that may be fully repaid in one installment), and compare that to the sum of the total principal repaid and total interest repaid. 
+
+```{r}
+temp <- raw_data
+temp$sum_rec_int_and_prncp <- temp$total_rec_prncp + temp$total_rec_int
+head(subset(temp,last_pymnt_amnt > loan_amnt, select = c("repay_fail","loan_amnt","last_pymnt_amnt","sum_rec_int_and_prncp","total_rec_prncp", "total_rec_int")))
+```
+
+As these values are extremely similar, we confirm that the "last repayment amount" is relevant only to the specific loan record, and not historical information about the customer that might be available on new loan applications.
+
+Due to this interpretation, as this information will obviously not be available when assessing new loan applications, we will not consider including this variable in our analysis as it will not be of value for predicting credit risk in new loan applications.
+
+```{r}
+data <- subset(data, select = -c(last_pymnt_amnt))
+```
+
+
+Next, we explore the data for any correlation between variables, as any highly correlated variable pairs should be dropped. We do this by exploring the GGPairs and correlation table values. 
+
+We initially check the GGPairs and correlation for continuous variables. 
+
+```{r}
+ggpairs(data[, c("loan_amnt", "int_rate", "annual_inc", "dti", "revol_bal", "revol_util", "total_rec_prncp", "total_rec_int", "credit_age_yrs")])
+```
+```{r}
+cor(data[, c("loan_amnt", "int_rate", "annual_inc", "dti", "revol_bal", "revol_util", "total_rec_prncp", "total_rec_int", "credit_age_yrs")])
+```
+
+Next we check the same for the discrete variables.
+
+```{r}
+ggpairs(data[, c("loan_amnt", "delinq_2yrs", "inq_last_6mths", "open_acc", "pub_rec", "total_acc", "repay_fail")])
+```
+```{r}
+cor(data[, c("loan_amnt", "delinq_2yrs", "inq_last_6mths", "open_acc", "pub_rec", "total_acc", "repay_fail")])
+```
+
+We have determined the following pairs to have a high amount of positive correlation (more than 65%), so we will be dropping one of each pair.  
+
+"loan_amnt" and "total_rec_prncp" have a correlation of 0.85.
+"loan_amnt" and "total_rec_int" have a correlation of 0.73.
+"total_rec_prncp" and "total_rec_int" have a correlation of 0.69.
+"open_acc" and "total_acc" have a correlation of 0.69.
+
+Logically, it does make sense for these variables to correlated, as loans with high loan amounts would have both high principal repaid and high interest repaid, so we feel comfortable dropping both these variables in favor of keeping only "loan_amnt". It is also reasonable that a customer who has a high number of credit lines in their file would also have a high number of open credit lines in their file, so we also feel comfortable dropping "open_acc". 
+
+```{r}
+data <- subset(data, select = -c(total_rec_prncp,total_rec_int,open_acc))
+```
+
+Return the structure of the data, confirming data types are factors where appropriate and the three columns (total_rec_prncp, total_rec_int, open_acc) have been dropped from the data set.
+
+We confirm the structure of the data, verify the data types, and examine the summary statistics for the dataset.
+
+```{r}
+str(data)
+```
+```{r}
+summary(data)
+```
+
+As confirmed earlier during our explanatory analysis, we can see that a few of the variables are on very large scales, such as "loan_amnt", "annual_inc", and "revol_bal", and therefore should be scaled prior to modelling. 
+
+However, instead of scaling only those few variables, we have decided to scale all the numeric variables. This is for the following two reasons:
+
+- To avoid dealing with extremely small numbers in coefficients.
+- Having all covariates on the same scale will allow us to equivalently compare the coefficients and determine which have comparatively larger magnitudes of effects.
+
+Doing this does lead to issues with interpreting the intercept value when unstandardizing the model, but this is not an issue as we will be comparing only the covariate coefficients. 
+
+We will begin by loading the validation data and perform the same pre-processing steps on the validation data as we did on the train data. 
+
+```{r }
+raw_validation_data <- read.csv("benchmark_validation_loan_data.csv",header=TRUE)
+
+validation_data <- subset(raw_validation_data, select = -c(X))
+validation_data$emp_length <- factor(validation_data$emp_length)
+validation_data$home_ownership <- factor(validation_data$home_ownership)
+validation_data$verification_status <- factor(validation_data$verification_status)
+validation_data$purpose <- factor(validation_data$purpose)
+validation_data$term <- factor(validation_data$term)
+
+validation_data <- subset(validation_data, select = -c(total_rec_prncp,total_rec_int,open_acc,last_pymnt_amnt))
+```
+
+Ideally we would scale the data before stratifying or seperating the train and test datasets, so to appropriate standardize the data, we first calculate the means and standard deviations for each numeric covariate of the combined training and validation datasets, then scale each dataset using those values so that each dataset is on the same scale. 
+
+```{r}
+data_all_scaled <- data
+validation_data_all_scaled <- validation_data
+total_data <- rbind(data,validation_data)
+
+for (i in c('loan_amnt', 'int_rate','annual_inc', 'dti','delinq_2yrs', 'inq_last_6mths','total_acc', 'pub_rec','revol_bal', 'revol_util', 'credit_age_yrs')){
+  if (is.numeric(data[[i]]) == TRUE){
+    mean = mean(total_data[[i]])
+    std = sd(total_data[[i]])
+    validation_data_all_scaled[[i]] = (validation_data_all_scaled[[i]] - mean)/std
+    data_all_scaled[[i]] = (data_all_scaled[[i]] - mean)/std
+  } 
+}
+
+```
+
+
+# Model Choice
+
+As our data is structured with a binary target variable (repay_fail) with no count information, we will choose a binomial GLM with the logit link function to model repay fail as a function of the independent variables. 
+
+
+## Assumptions - what to keep in this part?
+
+we have to assume independence even though they're not.
+
+## Stepwise Regression
+
+As part of the analysis, step-wise selection based on the AIC was chosen to determine which variables should appear in the preferred model. Both backward and forward selection were used to determine the preferred covariates in the model:
+
+```{r, echo=TRUE, cache=TRUE}
+full_noninteraction_model_logit <- glm(repay_fail ~ .,data=data_all_scaled,family=binomial(link = "logit"))
+
+null_model_logit <- glm(repay_fail ~ 1,data=data_all_scaled,family=binomial(link = "logit"))
+```
+
+```{r, echo=TRUE, cache=TRUE}
+backward_noninteraction_logit <- stepAIC(full_noninteraction_model_logit,direction="backward",trace=F)
+
+forward_noninteraction_logit <- stepAIC(null_model_logit,scope=list(upper=full_noninteraction_model_logit,lower=null_model_logit), direction = "forward", trace = F)
+```
+
+
+```{r}
+formula(backward_noninteraction_logit)
+AIC(backward_noninteraction_logit)
+
+formula(forward_noninteraction_logit)
+AIC(forward_noninteraction_logit)
+```
+
+As expected, the backward and forward step-wise model selection based on AIC values have arrived to the same formula with an AIC of 18,160.67. Before we proceed to investigating the model fit and residuals, we will first explore alternative link functions.
+
+# Alternative Link Functions
+
+The other two link functions we will explore with this binomial model is the "probit" link function and the "cloglog" link function. 
+
+We will begin with a binomial model using the probit link function, again using stepwise AIC in order to achieve the best model.
+
+```{r, echo=TRUE}
+full_noninteraction_model_probit <- glm(repay_fail ~ .,data=data_all_scaled,family=binomial(link = "probit"))
+
+null_model_probit <- glm(repay_fail ~ 1,data=data_all_scaled,family=binomial(link = "probit"))
+```
+
+```{r, echo=TRUE}
+backward_noninteraction_probit <- step(full_noninteraction_model_probit,scope=~.,direction="backward",trace=F)
+
+forward_noninteraction_probit <- stepAIC(null_model_probit, scope = formula(full_noninteraction_model_probit), direction = "forward", trace = F)
+```
+
+```{r}
+formula(backward_noninteraction_probit)
+AIC(backward_noninteraction_probit)
+formula(forward_noninteraction_probit)
+AIC(forward_noninteraction_probit)
+```
+
+Once again, the backward and forward step-wise model selection based on AIC values have arrived to the same formula. The differences between this model and the one generated with the logit link function is the addition of the parameters for "verification_status" and "total_acc", with a slightly reduced AIC of 18150.73 compared to the previous AIC of 18,160.67. 
+
+Finally, we will investigate the "cloglog" link function. 
+
+```{r, echo=TRUE}
+full_noninteraction_model_cloglog <- glm(repay_fail ~ .,data=data_all_scaled,family=binomial(link = "cloglog"))
+
+null_model_cloglog <- glm(repay_fail ~ 1,data=data_all_scaled,family=binomial(link = "cloglog"))
+```
+
+```{r, echo=TRUE}
+backward_noninteraction_cloglog <- step(full_noninteraction_model_cloglog,scope=~.,direction="backward",trace=F)
+
+forward_noninteraction_cloglog <- stepAIC(null_model_cloglog, scope = formula(full_noninteraction_model_cloglog), direction = "forward", trace = F)
+```
+
+```{r}
+formula(backward_noninteraction_cloglog)
+AIC(backward_noninteraction_cloglog)
+formula(forward_noninteraction_cloglog)
+AIC(forward_noninteraction_cloglog)
+```
+
+The model generated by the cloglog link function has the same parameters as the model generated using the logit link function, but has a worse AIC of 18191.95 compared to the logit link function AIC of 18,160.67.
+
+***enter a comparison table here***
+
+Although the probit link function has a marginally improved AIC, we prefer to use the logit link function due to the simplicity of the reduced number of features, as well as due to the ease of interpretability of the model with the logit link function. 
+
+## Residuals
+
+Now that we have decided on the logit link model, we will next investigate the goodness of fit for the model by checking the residuals. 
+
+```{r}
+plot(residuals(forward_noninteraction_logit), main = "Residuals")
+```
+
+```{r}
+out <- influence(forward_noninteraction_logit)
+pr <- out$pear.res
+plot(pr,ylim=c(-6,6), main = "Standardized Pearson's Residuals")
+abline(h = 0, col = "red")
+```
+
+```{r}
+out <- influence(forward_noninteraction_logit)
+rsd <- out$dev.res/(sqrt(1-out$hat))
+plot(rsd, main = "Standardized Deviance Residuals")
+abline(h = 0, col = "red")
+```
+
+The standardized Pearson's residuals and the standardized deviance residuals are generally not useful in this case, as they should the expected residual pattern that is expected with a binary dataset.
+
+The simulated residuals will show a clearer picture of the goodness of fit for the model.
+
+```{r}
+plot(simulateResiduals(forward_noninteraction_logit))
+```
+
+The QQ Plot residuals for the simulated residuals looks great, with no significant deviations away from the line. The "Residual vs. predicted" plot of the residual versus the model predictions (rank transformed) also looks acceptable with a reasonably horizontal line overlaid on the noise/jitter due to the large amount of data points in the dataset.
+
+As these residuals look good, we feel comfortable enough to proceed with the rest of the analysis. However, before we move onto interpreting the significance of the model, we must first explore whether we should add interaction terms to the model. 
+
+# Full Interaction Model
+
+Step-wise selection based on AIC will once again be used to determine the best model that includes interaction terms. 
+
+As there are a large number of potential terms included, we will only do a forward interaction step-wise AIC due to the significant processing time required. We feel comfortable with this as ideally both forward and backward would lead to the same formula and AIC, and if we choose to proceed with the interaction model then we can confirm that both are the same at that time. 
+
+```{r}
+full_interaction_model_logit <- glm(repay_fail ~ .^2,data=data_all_scaled,family=binomial(link = "logit"))
+
+forward_interaction_logit <- stepAIC(null_model_logit,scope=list(upper=full_interaction_model_logit,lower=null_model_logit), direction = "forward", trace = F)
+
+formula(forward_interaction_logit)
+AIC(forward_interaction_logit)
+```
+
+# Nested Model Comparisons
+
+The AIC for the interaction model is lower, so we will perform a likelihood ratio test to determine if the extra covariates are required. 
+
+The hypotheses are as follows:
+
+H0: Additional interaction terms are NOT needed as parameters to explain variation. 
+H1: Additional interaction terms are needed to explain variation.
+
+```{r}
+anova(forward_interaction_logit,forward_noninteraction_logit,test="Chisq")
+```
+As the p value is 3.119e-11 which is less than the alpha of 0.05, there is enough evidence to reject the null hypothesis that the additional interaction terms are not needed to explain variation. This implies that the interaction model is preferred, but the concern is that this introduces a significant level of complexity to the model. 
+
+We should also perform a likelihood ratio test to compare the restricted model with the null, intercept only model.
+
+The hypotheses are as follows:
+
+H0: The additional parameters in the restricted model are NOT needed to explain variation.
+H1: The additional parameters in the restricted model are needed to explain variation.
+
+```{r}
+anova(forward_noninteraction_logit,null_model_logit,test="Chisq")
+```
+As the p value is < 2.2e-16 which is less than the alpha of 0.05, there is enough evidence to reject the null hypothesis that the additional parameters in the restricted model are NOT needed to explain variation.
+
+# Performance
+
+Now that we have some suitable models, we will assess the performance using a cross validation approach. We will initially compile the ROC curves and Gini scores for both models (the interaction terms model and the restricted model) for the seen (training) data before then creating the ROC curves and Gini scores for the validation (testing) data. 
+
+The following ROC curves show the performance using the training data: 
+
+```{r,include=TRUE}
+prob=predict(forward_interaction_logit,type=c("response"))
+g <- roc(data_all_scaled$repay_fail ~ prob)
+plot(g, main = "Train Set ROC (Interaction Model), Gini = 0.4171101", ylab = "True positive rate", xlab = "False positive rate")
+g$auc # if it is closer 1, the model is predicting well # gini coefficient # confusion matrix 
+Gini = 2*(g$auc - 1/2); Gini
+```   
+
+```{r,include=TRUE}
+prob=predict(forward_noninteraction_logit,type=c("response"))
+g <- roc(data_all_scaled$repay_fail ~ prob)
+plot(g, main = "Train Set ROC (Restricted Model), Gini = 0.4114379", ylab = "True positive rate", xlab = "False positive rate")
+g$auc # if it is closer 1, the model is predicting well # gini coefficient # confusion matrix 
+Gini = 2*(g$auc - 1/2); Gini
+```
+
+The following ROC curves show the performance using the validation data: 
+
+```{r}
+prob=predict(forward_interaction_logit, validation_data_all_scaled,type=c("response"))
+g <- roc(validation_data_all_scaled$repay_fail ~ prob)
+plot(g, main = "Test Set ROC (Interaction Model), Gini = 0.3913872", ylab = "True positive rate", xlab = "False positive rate")
+g$auc # if it is closer 1, the model is predicting well # gini coefficient # confusion matrix 
+Gini = 2*(g$auc - 1/2); Gini
+```
+```{r}
+prob=predict(forward_noninteraction_logit, validation_data_all_scaled,type=c("response"))
+g <- roc(validation_data_all_scaled$repay_fail ~ prob)
+plot(g, main = "Test Set ROC (Restricted Model), Gini = 0.3962686", ylab = "True positive rate", xlab = "False positive rate")
+g$auc # if it is closer 1, the model is predicting well # gini coefficient # confusion matrix 
+Gini = 2*(g$auc - 1/2); Gini
+```
+
+Train Set ROC (Restricted Model), Gini = 0.4114379
+Train Set ROC (Interaction Model), Gini = 0.4171101
+Test Set ROC (Restricted Model), Gini = 0.3962686
+Test Set ROC (Interaction Model), Gini = 0.3913872
+
+For the train set, using the interaction model improved the gini score by 1.38%
+For the test set, using the interaction model decreased the gini score by 1.23%
+
+AIC of the restricted model: 18160.57
+AIC of the interaction model: 18108.42
+The interaction model reduces the AIC by 0.29%
+
+The restricted model has 32 parameters. The interaction model has 51 parameters.
+
+Due to these performance comparisons not showing a significant improvement by using the more complex model, we will prefer to use the restricted model despite the marginally higher AIC. 
+
+# Statistical Significance
+
+```{r}
+summary(forward_noninteraction_logit)
+```
+
+The following coefficients are significant:
+
+```{r}
+x <- data.frame(Covariate = c('int_rate','purposemedical','purposemoving','purposeother','purposesmall_business','annual_inc','inq_last_6mths','term60 months','revol_util','emp_lengthn/a','revol_bal','pub_rec'), 
+           Estimate = c(0.40762,0.59470,0.48947,0.44403,1.01440,-0.36094,0.21841,0.44877,0.11831,0.54709,0.09536,0.06016), 
+           "Std.Error" = c(0.02514,0.17356,0.18449,0.12258,0.13072,0.03196,0.01753,0.04626,0.02297,0.11949,0.02054,0.01689), 
+           "P.Value" = c("< 2e-16",0.000611,0.007974,0.000292,8.47e-15,'< 2e-16','< 2e-16','< 2e-16',2.60e-07,4.68e-06,3.42e-06,0.000368), stringsAsFactors=FALSE)
+
+arrange(x,desc(Estimate))
+```
+
+# 95% Confidence Interval
+
+```{r, include=TRUE}
+model_confint <- confint(forward_noninteraction_logit)
+model_confint
+```
+
+# Coefficient Interpretation
+
+```{r, echo=FALSE}
+x <- data.frame(Covariate = c('int_rate','purposemedical','purposemoving','purposeother','purposesmall_business','annual_inc','inq_last_6mths','term60 months','revol_util','emp_lengthn/a','revol_bal','pub_rec'), 
+           Estimate = c(0.40762,0.59470,0.48947,0.44403,1.01440,-0.36094,0.21841,0.44877,0.11831,0.54709,0.09536,0.06016),
+           "LowerLimit" = c(0.35839922,0.25235701,0.12376775,0.20749178,0.76130666,-0.42431597,0.18412652,0.35799488,0.07333507,0.31053486,0.05494022,0.02668470),
+           "UpperLimit" = c(0.45693419,0.93351852,0.84802671,0.68840388,1.27411482,-0.29903759,0.25283276,0.53934704,0.16338118,0.77920209,0.13573067,0.09291287), 
+           "Std.Error" = c(0.02514,0.17356,0.18449,0.12258,0.13072,0.03196,0.01753,0.04626,0.02297,0.11949,0.02054,0.01689), 
+           "P.Value" = c("< 2e-16",0.000611,0.007974,0.000292,8.47e-15,'< 2e-16','< 2e-16','< 2e-16',2.60e-07,4.68e-06,3.42e-06,0.000368), stringsAsFactors=FALSE)
+
+arrange(x,desc(Estimate))
+```
+
+Interpreting the model will be easier by transforming the coefficients on the logit scale to be in terms of odds ratios. We do this by exponentiating the estimates and confidence intervals.
+
+```{r}
+x$ExpEstimate <- exp(x$Estimate)
+x$ExpLowerLimit <- exp(x$LowerLimit)
+x$ExpUpperLimit <- exp(x$UpperLimit)
+
+#Log Odds
+arrange(x[c('Covariate','ExpEstimate', 'ExpLowerLimit','ExpUpperLimit','Std.Error','P.Value')],desc(ExpEstimate))
+```
+
+The table above, indicating the odds ratios for significant coefficients indicate that the highest predictor for a loan default is whether the purpose of the loan is for a small business is not. "Small business" as a purpose increases the odds of default by 176% due to the odds ratio of 2.76 (2.14, 3.58) from a coefficient of 1.01 (0.76, 1.27).
+
+The other significant purposes are for "medical", "moving", and "other", which have odds ratios of 1.81 (1.29, 2.54), 1.63 (1.13, 2.34), and 1.56 (1.23, 1.99) respectively. 
+
+The employment length being "n/a" is the third strongest predictor for default risk with an odds ratio of 1.73 (1.36, 2.18), but an interesting note is that "n/a" is the only significant employment length. The data dictionary does not explicitly state what "n/a" is indicative of, whether it indicates a lack of information or if the person is unemployed, so further investigation would need to be done to understand the meaning of that covariate.
+
+Having a higher term of "60 months" is the fifth highest predictor with an odds ratio of 1.57 (1.43, 1.71).
+
+However, as previously noted in the exploratory analysis/visualizations, we have discovered that there does seem to be an association between higher term lengths and higher interest rates. This does make sense, as banks typically have to balance the higher risk of longer loan durations with an increased interest rate. 
+
+This association explains the significance of the term factor, as rationally it does not make sense that having a longer duration to pay off a loan would result in the loan having a higher risk of being defaulted on. Further analysis could be done by removing the term factor - we speculate that interest rate would then have a higher coefficient and become a stronger predictor, but it may reduce the performance of the model.
+
+***should we do this??? where do we show it? *** 
+***i forgot to unscale the numerical coefficients *** 
+
+Regardless, as it is, interest rate is the seventh highest predictor of our model with an odds ratio of 1.50 (1.43, 1.58). This means that for every unit increase in the interest rate, the odds of a default increases by approximately 50%. 
+
+The next strongest covariate is the only significant variable that reduces the risk of defaulting on a loan, which is the applicant's annual income. This had an original coefficient of -0.36 (-0.42, -0.30) corresponding to an odds ratio of 0.70 (0.65,0.74). The interpretation of this is that for every dollar increase in annual income, the odds of a default decreases by approximately 30%. 
+
+The number of inquiries in the last six months is the next strongest statistically significant predictor, with an odds ratio of 1.2440970 (1.2021679, 1.2876679)    
+
+revol_util and revol_bal are the next strongest predictors, although they are among the weaker ones at an odds ratios of 1.1255930 (1.0760910, 1.1774854) and 1.1000548 (1.0564775, 1.1453734) respectively. 
+
+The number of public records is the weakest statistically significant predictor, as with each increase in the number of public records on file for the applicant, the odds of a default increases by approximately  0.06% with an odds ratio of 1.0620065 (1.0270439, 1.0973661). 
+
+## Comparison with traditional predictors
+
+As part of this analysis, we will highlight the covariates with a surprising effect compared to those that are traditionally used to predict loan default. 
+
+The most surprising variable is DTI - the debt to income ratio – This is traditionally used by banks as one of their most important factors for assessing credit risk. Rationally, it seems reasonable, as an applicant who has to pay a higher portion of their income to existing debt payments seems more likely to default on a new loan. Surprisingly, this variable was excluded by our model, and even the exploratory plots showed that it had little effect on default risk.
+
+Number of public records is another factor that is considered important traditionally in order to assess credit risk, with applicants having more issues with the law being considered as , not really that important in the model but still significant 
+
+Interest rate – Important traditionally and our most important numeric variable, but not as important as expected (perhaps due to the presence of term)
+
+Term is another one that conflicts with traditional reasoning - the loan duration is not typically thought to have an effect at all on the credit risk. In fact, increasing the duration of the loan is typically thought of to reduce the risk of default, although the model states that an increased duration actually increases it. As speculated before, we consider that might be because term and interest rate are correlated: the increased timeframe of a higher duration being balanced by the bank with a higher interest rate, which could be the cause of the increased risk of default. 
+
+***another clue to remove term from the model***
+
+This leads us to the interesting issue of the interest rate. Traditionally, this is known to be a huge predictor for default risk, as very high interest rates would hugely increase the risk of default. However, like term, this variable is one set by the lender and is not a characteristic of the loan applicant or related to the purpose of the loan. A higher interest rate would obviously increase the risk of a default, but certainly would also increase the profitability of a loan were it to be fully repaid. It is in the interest of the lender to balance the interest rate to maximize profitability without greatly increasing the risk of default. 
+
+***Credit card isnt significant? should we graph it before unscaling?***
+
+```{r echo=FALSE}
+Coefficients <- c("int_rate", "purposemedical","purposemoving", "purposeother", "purposesmall_business", "inq_last_mth",
+            "term60_months","revol_util", "emp_lengthn/a","revol_bal", "pub_rec","credit_card", "annual_inc")
+
+Lower <- c(
+  exp(model_confint[2]/sd(raw_data$int_rate)), #int_rate
+  exp(model_confint[9]), # purposemedical
+  exp(model_confint[10]), # purposemoving
+  exp(model_confint[11]), # purposeother
+  exp(model_confint[13]), # purposesmall_business
+  exp(model_confint[17]/sd(raw_data$inq_last_6mths)), # inq_last_6mth
+  exp(model_confint[18]), # term60_months
+  exp(model_confint[19]/sd(raw_data$revol_util)), # revol_util
+  exp(model_confint[30]), # emp_lengthn/a
+  exp(model_confint[31]/sd(raw_data$revol_bal)), # revol_bal
+  exp(model_confint[32]/sd(raw_data$pub_rec)),
+  exp(model_confint[3]), #purposecreditcard
+  exp(model_confint[16]/sd(raw_data$annual_inc))) #annual_inc
+
+  
+Upper <- c(
+  exp(model_confint[2,2]/sd(raw_data$int_rate)), #int_rate
+  exp(model_confint[9,2]), # purposemedical
+  exp(model_confint[10,2]), # purposemoving
+  exp(model_confint[11,2]), # purposeother
+  exp(model_confint[13,2]), # purposesmall_business
+  exp(model_confint[17,2]/sd(raw_data$inq_last_6mths)), # inq_last_6mth
+  exp(model_confint[18,2]), # term60_months
+  exp(model_confint[19,2]/sd(raw_data$revol_util)), # revol_util
+  exp(model_confint[30,2]), # emp_lengthn/a
+  exp(model_confint[31,2]/sd(raw_data$revol_bal)), # revol_bal
+  exp(model_confint[32,2]/sd(raw_data$pub_rec)),
+  exp(model_confint[3,2]), #purposecreditcard
+  exp(model_confint[16,2]/sd(raw_data$annual_inc))) #annual_inc
+
+Mean <- c(
+  exp(summary(forward_noninteraction_logit)$coefficients[2,1]/sd(raw_data$int_rate)),
+  exp(summary(forward_noninteraction_logit)$coefficients[9,1]),
+  exp(summary(forward_noninteraction_logit)$coefficients[10,1]),
+  exp(summary(forward_noninteraction_logit)$coefficients[11,1]),
+  exp(summary(forward_noninteraction_logit)$coefficients[13,1]),
+  exp(summary(forward_noninteraction_logit)$coefficients[17,1]/sd(raw_data$inq_last_6mths)),
+  exp(summary(forward_noninteraction_logit)$coefficients[18,1]),
+  exp(summary(forward_noninteraction_logit)$coefficients[19,1]/sd(raw_data$revol_util)),
+  exp(summary(forward_noninteraction_logit)$coefficients[30,1]),
+  exp(summary(forward_noninteraction_logit)$coefficients[31,1]/sd(raw_data$revol_bal)),
+  exp(summary(forward_noninteraction_logit)$coefficients[32,1]/sd(raw_data$pub_rec)),
+  exp(summary(forward_noninteraction_logit)$coefficients[3,1]),
+  exp(summary(forward_noninteraction_logit)$coefficients[16,1]/sd(raw_data$annual_inc)))
+
+  exp(summary(forward_noninteraction_logit)$coefficients[3,1])
+  exp(model_confint[3]) #purposecreditcard
+  exp(model_confint[3,2]) #purposecreditcard
+
+  exp(summary(forward_noninteraction_logit)$coefficients[16,1]/sd(raw_data$annual_inc))
+
+  
+plot_df <- data.frame(Coefficients, Mean, Lower, Upper)
+ggplot(plot_df, aes(Mean, Coefficients))+
+  geom_point()+
+  theme_bw()+
+  xlim(0.5,3.6)+
+  labs(x = "Confidence Interval",
+       y = "Significant Covariates",
+       title = "Representation of Coefficient's Odds Ratio")+
+  geom_errorbar(aes(xmin = Lower),
+                    xmax = Upper)
+```
+
+
+
+# ---Section Two---
+
+# Extending the Data
+
+The next stage of the analysis is to account for whether they may be any variation in trends that may exist over time or between jurisdictions.
+
+Accounting for these effects is a necessity to validate the assumptions of the model, which assumes for independence.
+
+
+# Data Pre-Processing
+
+In order to conduct this analysis, we will be utilizing an extended dataset with a few extra columns, which are:
+
+1. issue_d: The issue date of the loan, in the format of MM-YY.
+2. earliest_cr_line: The month the borrower's earliest reported credit line was opened.
+3. addr_state: The state of residence of the loan borrower.
+4. zip_code: The zip code of residence of the loan borrower. 
+
+This dataset will be pre-processed and formatted in the same way as the original dataset, by dropping the unnecessary columns and factorizing the relevant variables. 
+
+```{r raw extended data}
+raw_extended <- read.csv("extendend_version_loan_data.csv",header=TRUE)
+```
+
+```{r}
+extended_data <- subset(raw_extended, select = -c(X,total_rec_prncp,total_rec_int,open_acc,last_pymnt_amnt))
+extended_data$emp_length <- factor(extended_data$emp_length)
+extended_data$home_ownership <- factor(extended_data$home_ownership)
+extended_data$verification_status <- factor(extended_data$verification_status)
+extended_data$purpose <- factor(extended_data$purpose)
+extended_data$term <- factor(extended_data$term)
+extended_data$issue_d <- factor(extended_data$issue_d)
+extended_data$zip_code <- factor(extended_data$zip_code)
+extended_data$addr_state <- factor(extended_data$addr_state)
+extended_data$earliest_cr_line <- factor(extended_data$earliest_cr_line)
+
+head(extended_data)
+```
+
+Once again, we will be scaling the numeric variables of the dataset for two reasons:
+- Avoiding dealing with extremely small numbers in coefficients.
+- Having all covariates on the same scale so that the coefficients can be compared equivalently. 
+
+```{r}
+extended_data_all_scaled <- extended_data
+
+for (i in c('loan_amnt', 'int_rate','annual_inc', 'dti','delinq_2yrs', 'inq_last_6mths','total_acc', 'pub_rec','revol_bal', 'revol_util', 'credit_age_yrs')){
+  if (is.numeric(extended_data[[i]]) == TRUE){
+    mean = mean(extended_data[[i]])
+    std = sd(extended_data[[i]])
+    extended_data_all_scaled[[i]] = (extended_data_all_scaled[[i]] - mean)/std
+  } 
+}
+
+head(extended_data_all_scaled)
+```
+
+# Exploratory Plots
+
+***this plot doesnt work now. maybe add a few new plots?***
+
+As always, we will begin with some exploratory plots which will assist with guiding our analysis.
+
+```{r}
+raw_extended_temp <- raw_extended
+raw_extended_temp$issue_d <- my(raw_extended_temp$issue_d)
+
+ggplot(raw_extended_temp, aes(x=issue_d, y=repay_fail)) + 
+  stat_summary(aes(y = repay_fail,group=1), fun.y=mean, colour="red", geom="line",group=1)+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ 
+  scale_x_date(limits = as.Date(c("2007-07-01","2011-11-01")))+
+  labs(x="Loan Issue Date", y="Percentage of Loan Defaults", title="Percentage of Loan Default Over Time", fill="Loan Default") +
+  theme_bw()
+```
+
+***fill these in ***
+The exploratory plots point out a few things of interest to note:
+
+1. 
+
+2.  
+
+3.  
+
+4.  
+
+5.
+
+# Temp plots
+
+```{r}
+y <- extended_data$repay_fail
+q <- colSums(table(y,extended_data$addr_state))
+q <- rbind(q,q)
+table(y,extended_data$addr_state)/q
+```
+
+# Random Effect Selection
+
+The next step is to consider which random effects to add to the model. Typically this is done according to what random effects are structural to the data. As we are investigating variations over time, it does not make sense to include the "earliest credit line" variable as there is no structural grouping within the data according to that variable. 
+
+"Issue date" is clearly required to keep in order to check variations over time.
+
+Regarding "Address State" and "Zip Code", we have chosen to nest zip code within the address state variables. This suits the structural format of the data, as in reality, each zip code will be contained within a single US state, and one state can contain many zip codes. A zip code could not be in multiple states. This nesting is also required as our zip code variable has some masking applied on it (with all but the first three digits obscured) so without the nesting a single zip code could show up as being in multiple states. 
+
+The following creates a new variable that nests the zip code within the address state.
+
+```{r}
+extended_data_all_scaled <- within(extended_data_all_scaled, zip_code_state <- factor(as.factor(addr_state):zip_code))
+```
+
+
+# Model Choice 
+
+Considering our random effect selection, we will create a new model by using our model from the first part of the analysis as a base, then add on the random effects using the "glmer" function. 
+
+```{r}
+glmer_no_crline <- glmer(formula = repay_fail ~ int_rate + purpose + annual_inc + inq_last_6mths + 
+    term + revol_util + emp_length + revol_bal + pub_rec + (1|issue_d) + (1|addr_state) + (1|zip_code_state), family = "binomial" (link = "logit"), data = extended_data_all_scaled)
+```
+
+## Goodness-of-fit
+
+After fitting the model, we will assess the goodness of fit for the model by checking the residuals of the data. 
+
+```{r}
+plot(residuals(glmer_no_crline))
+```
+
+As expected, the residuals do not provide much value as it follows a distribution expected of binomial datasets.
+
+```{r}
+plot(simulateResiduals(glmer_no_crline))
+```
+
+The simulated residuals show a much clearer picture: 
+
+The QQ Plot residuals for the simulated residuals looks great, with no significant deviations away from the line. The "Residual vs. predicted" plot of the residual versus the model predictions (rank transformed) also looks acceptable with a reasonably horizontal line overlaid on the noise/jitter due to the large amount of data points in the dataset.
+
+As these residuals look good, we feel comfortable enough to proceed with the rest of the analysis. 
+
+## Goodness-of-fit
+
+Next we will check the distribution of the random effects, which should be modelled with a normal distribution by design. 
+
+```{r}
+res <- ranef(glmer_no_crline)
+hist(res$issue_d[,1]) 
+hist(res$zip_code_state[,1])  
+hist(res$addr_state[,1]) 
+```
+
+They do appear to follow a normal distribution, as expected. 
+
+# Statistical Significance
+
+```{r}
+summary(glmer_no_crline)
+```
+
+
+# Coefficient Interpretation
+
+## 95% Confidence Intervals
+
+Before we begin to interpret the coefficients, we will first create the 95% confidence intervals for only the significant parameters. 
+
+```{r}
+se <- sqrt(diag(vcov(glmer_no_crline)))
+# table of estimates with 95% CI
+tab <- cbind(Est = fixef(glmer_no_crline), LL = fixef(glmer_no_crline) - 1.96 * se, UL = fixef(glmer_no_crline) + 1.96 * se)
+tab_df <- as.data.frame(tab)
+tab_df_sig <- tab_df[c(2,4,5,9,10,11,12,13,16,17,18,19,21,30,31,32),]
+arrange(tab_df_sig,desc(Est))
+```
+
+## Odds Ratios
+
+Interpreting the model will be easier by transforming the coefficients on the logit scale to be in terms of odds ratios by taking the exponential. 
+
+```{r fit33,include=TRUE}
+tab_df <- as.data.frame(tab)
+tab_df_sig <- tab_df[c(2,4,5,9,10,11,12,13,16,17,18,19,21,30,31,32),]
+arrange(exp(tab_df_sig),desc(Est))
+```
+
+***interpret the coefficients***
+
+## Differences in Models
+
+***interpret the differences***
+
+# Exploring the Random Effects
+
+```{r}
+dd <- as.data.frame(rr1 <- ranef(glmer_no_crline))
+dd$low <- dd$condval - 1.96 * dd$condsd
+dd$high <- dd$condval + 1.96 * dd$condsd
+```
+
+```{r,include=TRUE}
+lattice::dotplot(ranef(glmer_no_crline, which = "issue_d", condVar = TRUE))
+arrange(filter(dd, (grpvar == 'issue_d' & (low > 0 | high < 0))),desc(condval))
+```
+
+***comment***
+Among the 55 months in the data, there are 11 significant months with the values of:
+
+
+
+```{r,include=TRUE}
+lattice::dotplot(ranef(glmer_no_crline, which = "addr_state", condVar = TRUE))
+arrange(filter(dd, (grpvar == 'addr_state' & (low > 0 | high < 0))),desc(condval))
+```
+
+Among the 50 states, there are 3 significant states with the values of:
+
+- FL (Florida): 0.2504517 (0.13318794, 0.3677154)
+- NV (Nevada): 0.2432750 (0.04340474, 0.4431453)
+- CA (California): 0.2068180 (0.11681649, 0.2968194)
+
+```{r,include=TRUE}
+lattice::dotplot(ranef(glmer_no_crline, which = "zip_code_state", condVar = TRUE), scales = list(y = list(alternating = 0)))
+arrange(filter(dd, (grpvar == 'zip_code_state' & (low > 0 | high < 0))),desc(condval))
+```
+
+Among the 905 zip codes nested within states, there is only one single significant zip code, which is "NV:891xx" - corresponding to the Las Vegas zip code range, with a value of 0.276582 (0.03727274,0.5158912).
+
+# Performance
+
+## Roc 
+
+```{r r,include=TRUE}
+prob=predict(glmer_no_crline,type=c("response"))
+g <- roc(extended_data_all_scaled$repay_fail ~ prob)
+plot(g, main = "Train Set ROC accounting for Random Effects, Gini = 0.4359", ylab = "True positive rate", xlab = "False positive rate")
+g$auc
+Gini = 2*(g$auc - 1/2); Gini
+```
+
+***compare the performance to the first model. and to the original model.***
+
+## Confusion Matrix
+
+```{r}
+#this one takes a while to run.. didnt run it
+mean(extended_data_all_scaled$repay_fail)
+pred.cv <- rep(0,38419)
+for(i in 1:38419){
+
+  pred.cv[i] <- predict(glmer_no_crline, newdata=extended_data_all_scaled[i,])
+}
+pred.cv <- exp(pred.cv)/(1+exp(pred.cv))
+ind <- which(pred.cv>0.1512012)
+ycv <- rep(0,38419)
+ycv[ind] <- 1
+confusion_full_0.15 <- table(extended_data_all_scaled$repay_fail, ycv)
+confusion_full_0.15
+
+ind <- which(pred.cv>0.5)
+ycv <- rep(0,38419)
+ycv[ind] <- 1
+confusion_full_0.50 <- table(extended_data_all_scaled$repay_fail, ycv)
+confusion_full_0.50
+
+
+```
+
+***isnt there a good confusion matrix function***
+
+# Conclusion
+
+***write a better conclusion***
+
+-There does appear to be some variation over time and between states, although not between zip codes. 
+
+-The variation over time seemed to reflect economic/ financial market strength.
+
+-Accounting for this variation as random effects increased our train set Gini by 5.94% from 0.411 to 0.436 from our restricted model, which is 282% increased from our initial reference Gini of 0.114.
+
+-Marginally better performance can be achieved at the cost of significantly increased model complexity.
+
+-An appropriate threshold should be chosen by the business, according to their risk tolerance. 
+
+Interest rate is a large predictor for credit risk, but this variable is controlled by the bank. We suggest, therefore, for the customer bank to first settle on a level of default risk that they are comfortable with, and then utilizing our model in order to determine the highest level of interest rate that they could provide the applicant.
+
+The "threshold" used to finalize the level of accepted risk can be achieved by using our provided ROC curve, in order to determine the proportion of false positives and false negative that the bank would be comfortable with, that would lead to the highest percentage of profitability. Obviously, we expect that the bank would be more comfortable with a higher level of risk than, for example, a healthcare scenario where lives would be directly at stake. 
+
+---------------------------------------------------------
+# To Do:
+
+how do we check for missing data
+
+Exploratory plots
+
+Model assumptions (~line 460)
+
+Link functions (~line 490)
+
+justification for choosing the logit link function
+
+(around Line 670) in the performance section, do a better analysis of the gini scores, complexity, everything. 
+
+interpret coefficients (significance and odds ratio)
+
+in the coefficient interpretation, should we include a model without the "term"? i think when i tested it, int rate coefficient goes up but overall gini score goes down.
+
+i forgot to unscale the numerical coefficients
+
+compare with historical predictors
+
+rewrite the conclusion of section 1 and section 2
+
+maybe can we get a better confusion matrix (low priority? at least show it in a nicer table)
+
+should the odds ratio graph have credit card?
+
+extended exploratory plots need fixing and need more
+
+isnt there a good confusion matrix function
